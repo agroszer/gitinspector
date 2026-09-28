@@ -30,6 +30,12 @@ def get_basedir():
 	return os.path.dirname(os.path.realpath(__file__))
 
 def get_basedir_git(path=None):
+	abs_path, repo_type = get_basedir_and_type(path)
+	if repo_type != "git":
+		sys.exit(_("Error processing git repository at \"%s\".") % (path if path else os.getcwd()))
+	return abs_path
+
+def get_basedir_and_type(path=None):
 	previous_directory = None
 
 	if path != None:
@@ -40,30 +46,68 @@ def get_basedir_git(path=None):
 		except OSError:
 			sys.exit(_("Error processing git repository at \"%s\".") % path)
 
-	bare_command = subprocess.Popen(["git", "rev-parse", "--is-bare-repository"],
-	                          stdout=subprocess.PIPE, stderr=open(os.devnull, "w"))
+	# Check if git repository
+	is_git = False
+	isbare = False
+	try:
+		with open(os.devnull, "w") as devnull:
+			bare_command = subprocess.Popen(["git", "rev-parse", "--is-bare-repository"],
+			                          stdout=subprocess.PIPE, stderr=devnull)
+			bare_out = bare_command.stdout.readlines()
+			bare_command.wait()
+			if bare_command.returncode == 0:
+				is_git = True
+				isbare = (bare_out[0].decode("utf-8", "replace").strip() == "true")
+	except OSError:
+		pass
 
-	isbare = bare_command.stdout.readlines()
-	bare_command.wait()
+	if is_git:
+		absolute_path = None
 
-	if bare_command.returncode != 0:
-		sys.exit(_("Error processing git repository at \"%s\".") % os.getcwd())
+		if isbare:
+			absolute_path = subprocess.Popen(["git", "rev-parse", "--git-dir"], stdout=subprocess.PIPE).stdout
+		else:
+			absolute_path = subprocess.Popen(["git", "rev-parse", "--show-toplevel"],
+			                                 stdout=subprocess.PIPE).stdout
 
-	isbare = (isbare[0].decode("utf-8", "replace").strip() == "true")
-	absolute_path = None
+		absolute_path = absolute_path.readlines()
 
-	if isbare:
-		absolute_path = subprocess.Popen(["git", "rev-parse", "--git-dir"], stdout=subprocess.PIPE).stdout
-	else:
-		absolute_path = subprocess.Popen(["git", "rev-parse", "--show-toplevel"],
-		                                 stdout=subprocess.PIPE).stdout
+		if len(absolute_path) == 0:
+			sys.exit(_("Unable to determine absolute path of git repository."))
 
-	absolute_path = absolute_path.readlines()
+		if path != None:
+			os.chdir(previous_directory)
 
-	if len(absolute_path) == 0:
-		sys.exit(_("Unable to determine absolute path of git repository."))
+		return absolute_path[0].decode("utf-8", "replace").strip(), "git"
+
+	# Check if svn repository
+	is_svn = False
+	svn_info = b""
+	try:
+		with open(os.devnull, "w") as devnull:
+			svn_command = subprocess.Popen(["svn", "info"],
+			                         stdout=subprocess.PIPE, stderr=devnull)
+			svn_info = svn_command.communicate()[0]
+			if svn_command.returncode == 0:
+				is_svn = True
+	except OSError:
+		pass
+
+	if is_svn:
+		wc_root = None
+		for line in svn_info.decode("utf-8", "replace").splitlines():
+			if line.startswith("Working Copy Root Path:"):
+				wc_root = line.split(":", 1)[1].strip()
+				break
+		if not wc_root:
+			wc_root = os.getcwd()
+
+		if path != None:
+			os.chdir(previous_directory)
+
+		return wc_root, "svn"
 
 	if path != None:
 		os.chdir(previous_directory)
 
-	return absolute_path[0].decode("utf-8", "replace").strip()
+	sys.exit(_("Error processing git repository at \"%s\".") % (path if path else os.getcwd()))

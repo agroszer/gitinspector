@@ -18,8 +18,9 @@
 # along with gitinspector. If not, see <http://www.gnu.org/licenses/>.
 
 from __future__ import unicode_literals
+import os
 import re
-from . import git, workers
+from . import git, svn, workers
 
 __filters__ ={"file": [set(), set()], "author": [set(), set()], "email": [set(), set()], "revision": [set(), set()],
                "message" : [set(), None]}
@@ -71,6 +72,8 @@ def has_filtered():
 	return False
 
 def __find_commit_message__(sha):
+	if svn.is_svn_repository(os.getcwd()):
+		return svn.get_log_message(os.getcwd(), sha)
 	return git.decode(workers.output_of(["git", "show", "-s", "--pretty=%B", "-w", sha]).strip())
 
 def set_filtered(string, filter_type="file"):

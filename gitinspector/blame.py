@@ -20,12 +20,13 @@
 from __future__ import print_function
 from __future__ import unicode_literals
 import datetime
+import os
 import re
 import subprocess
 import threading
 from .localization import N_
 from .changes import FileDiff
-from . import comment, extensions, filtering, format, git, interval, terminal, workers
+from . import comment, extensions, filtering, format, git, interval, svn, terminal, workers
 
 class BlameEntry(object):
 	lines = 0
@@ -47,7 +48,7 @@ __blame_lock__ = threading.Lock()
 AVG_DAYS_PER_MONTH = 30.4167
 
 class BlameThread(workers.Worker):
-	def __init__(self, useweeks, changes, blame_command, extension, blames, filename):
+	def __init__(self, useweeks, changes, blame_command, extension, blames, filename, is_svn=False, repo_location=None):
 		workers.Worker.__init__(self)
 
 		self.useweeks = useweeks
@@ -56,6 +57,8 @@ class BlameThread(workers.Worker):
 		self.extension = extension
 		self.blames = blames
 		self.filename = filename
+		self.is_svn = is_svn
+		self.repo_location = repo_location
 
 		self.is_inside_comment = False
 		self.author_blames = {}
@@ -111,12 +114,17 @@ class BlameThread(workers.Worker):
 				entry.skew_m += (skew / AVG_DAYS_PER_MONTH)
 
 	def work(self):
-		lines = workers.lines_of(self.blame_command)
+		if self.is_svn:
+			lines = svn.get_blame_porcelain(self.repo_location or os.getcwd(), self.filename)
+		else:
+			lines = workers.lines_of(self.blame_command)
+
 		self.__clear_blamechunk_info__()
 
 		#pylint: disable=W0201
 		for j in range(0, len(lines)):
-			line = git.decode(lines[j]).strip()
+			line = git.decode(lines[j]) if isinstance(lines[j], bytes) else lines[j]
+			line = line.strip()
 			keyval = line.split(" ", 2)
 
 			if self.blamechunk_is_last:
@@ -143,11 +151,20 @@ class Blame(object):
 	def __init__(self, repo, hard, useweeks, changes):
 		self.blames = {}
 		self.useweeks = useweeks
-		ls_tree_p = subprocess.Popen(["git", "ls-tree", "--name-only", "-r", "-z", interval.get_ref()],
-		                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-		lines = [entry for entry in ls_tree_p.communicate()[0].split(b"\0") if entry]
 
-		if ls_tree_p.returncode == 0:
+		location = repo.location if repo else os.getcwd()
+		is_svn = (repo and getattr(repo, "repo_type", None) == "svn") or svn.is_svn_repository(location)
+
+		if is_svn:
+			lines = [f.encode("utf-8") for f in svn.get_files(location)]
+		else:
+			ls_tree_p = subprocess.Popen(["git", "ls-tree", "--name-only", "-r", "-z", interval.get_ref()],
+			                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+			lines = [entry for entry in ls_tree_p.communicate()[0].split(b"\0") if entry]
+			if ls_tree_p.returncode != 0:
+				lines = []
+
+		if len(lines) > 0:
 			progress_text = _(PROGRESS_TEXT)
 
 			if repo != None:
@@ -158,10 +175,10 @@ class Blame(object):
 
 				if extensions.is_located(FileDiff.get_extension(line)) and \
 				   FileDiff.is_valid_extension(line) and not filtering.set_filtered(FileDiff.get_filename(line)):
-					blame_command = filter(None, ["git", "blame", "--line-porcelain", "--root", "-w"] + \
+					blame_command = None if is_svn else filter(None, ["git", "blame", "--line-porcelain", "--root", "-w"] + \
 							(["-C", "-C", "-M"] if hard else []) +
 					                [interval.get_since(), interval.get_ref(), "--", line])
-					BlameThread(useweeks, changes, blame_command, FileDiff.get_extension(line), self.blames, line).start()
+					BlameThread(useweeks, changes, blame_command, FileDiff.get_extension(line), self.blames, line, is_svn, location).start()
 
 					if format.is_interactive_format():
 						terminal.output_progress(progress_text, i, len(lines))

@@ -18,10 +18,11 @@
 # along with gitinspector. If not, see <http://www.gnu.org/licenses/>.
 
 from __future__ import unicode_literals
+import os
 import re
 import subprocess
 from .changes import FileDiff
-from . import comment, filtering, git, interval, workers
+from . import comment, filtering, git, interval, svn, workers
 
 __metric_eloc__ = {"java": 500, "c": 500, "cpp": 500, "cs": 500, "h": 300, "hpp": 300, "php": 500, "py": 500, "glsl": 1000,
                    "rb": 500, "js": 500, "sql": 1000, "xml": 1000, "go": 500, "swift": 500, "ts": 500, "tsx": 500,
@@ -80,33 +81,52 @@ METRIC_CYCLOMATIC_COMPLEXITY_DENSITY_THRESHOLD = 0.75
 METRIC_COGNITIVE_COMPLEXITY_THRESHOLD = 45
 
 class MetricsThread(workers.Worker):
-	def __init__(self, metrics, filename):
+	def __init__(self, metrics, filename, is_svn=False, location=None):
 		workers.Worker.__init__(self)
 
 		self.metrics = metrics
 		self.filename = filename
+		self.is_svn = is_svn
+		self.location = location
 
 	def work(self):
-		file_r = workers.lines_of(["git", "show", interval.get_ref() + ":{0}".format(self.filename)])
+		if self.is_svn:
+			path = os.path.join(self.location or os.getcwd(), self.filename)
+			try:
+				with open(path, "rb") as f:
+					file_r = f.read().splitlines()
+			except Exception:
+				file_r = []
+		else:
+			file_r = workers.lines_of(["git", "show", interval.get_ref() + ":{0}".format(self.filename)])
+
 		self.metrics.measure(self.filename, MetricsLogic.decode_lines(file_r))
 
 class MetricsLogic(object):
-	def __init__(self):
+	def __init__(self, location=None):
 		self.eloc = {}
 		self.cyclomatic_complexity = {}
 		self.cyclomatic_complexity_density = {}
 		self.cognitive_complexity = {}
 
-		ls_tree_p = subprocess.Popen(["git", "ls-tree", "--name-only", "-r", "-z", interval.get_ref()],
-		                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-		lines = [entry for entry in ls_tree_p.communicate()[0].split(b"\0") if entry]
+		location = location or os.getcwd()
+		is_svn = svn.is_svn_repository(location)
 
-		if ls_tree_p.returncode == 0:
+		if is_svn:
+			lines = [f.encode("utf-8") for f in svn.get_files(location)]
+		else:
+			ls_tree_p = subprocess.Popen(["git", "ls-tree", "--name-only", "-r", "-z", interval.get_ref()],
+			                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+			lines = [entry for entry in ls_tree_p.communicate()[0].split(b"\0") if entry]
+			if ls_tree_p.returncode != 0:
+				lines = []
+
+		if len(lines) > 0:
 			for i in lines:
 				i = git.decode(i)
 
 				if FileDiff.is_valid_extension(i) and not filtering.set_filtered(FileDiff.get_filename(i)):
-					MetricsThread(self, i).start()
+					MetricsThread(self, i, is_svn, location).start()
 
 			workers.join()
 
