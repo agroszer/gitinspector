@@ -29,7 +29,7 @@ from .changes import Changes
 from .config import GitConfig
 from .metrics import MetricsLogic
 from . import (basedir, clone, extensions, filtering, format, git, help, interval,
-               localization, optval, terminal, version, workers)
+               localization, optval, svn, terminal, version, workers)
 from .output import outputable
 from .output.blameoutput import BlameOutput
 from .output.changesoutput import ChangesOutput
@@ -113,9 +113,9 @@ def __check_python_version__():
 		python_version = str(sys.version_info[0]) + "." + str(sys.version_info[1])
 		sys.exit(_("gitinspector requires at least Python 2.6 to run (version {0} was found).").format(python_version))
 
-def __get_validated_git_repos__(repos_relative):
+def __get_validated_repos__(repos_relative):
 	if not repos_relative:
-		repos_relative = "."
+		repos_relative = ["."]
 
 	repos = []
 
@@ -124,13 +124,23 @@ def __get_validated_git_repos__(repos_relative):
 		cloned_repo = clone.create(repo)
 
 		if cloned_repo.name == None:
-			cloned_repo.location = basedir.get_basedir_git(cloned_repo.location)
+			cloned_repo.location, cloned_repo.repo_type = basedir.get_basedir_and_type(cloned_repo.location)
 			cloned_repo.name = os.path.basename(cloned_repo.location)
 
-		cloned_repo.branch = git.get_branch(cloned_repo.location)
+		if cloned_repo.repo_type == "git":
+			if not git.is_available():
+				sys.exit(_("The git executable could not be started. gitinspector needs it in the PATH to run."))
+			cloned_repo.branch = git.get_branch(cloned_repo.location)
+		elif cloned_repo.repo_type == "svn":
+			if not svn.is_available():
+				sys.exit(_("The svn executable could not be started. gitinspector needs it in the PATH to run."))
+			cloned_repo.branch = svn.get_branch(cloned_repo.location)
+
 		repos.append(cloned_repo)
 
 	return repos
+
+__get_validated_git_repos__ = __get_validated_repos__
 
 def main():
 	#The streams are taken over before anything is written, so that --version and --help also survive
@@ -157,10 +167,10 @@ def main():
 				version.output()
 				sys.exit(0)
 
-		if not git.is_available():
+		if not git.is_available() and not svn.is_available():
 			sys.exit(_("The git executable could not be started. gitinspector needs it in the PATH to run."))
 
-		repos = __get_validated_git_repos__(list(OrderedDict.fromkeys(args)))
+		repos = __get_validated_repos__(list(OrderedDict.fromkeys(args)))
 
 		#We need the repos above to be set before we read the git config.
 		GitConfig(run, repos[-1].location).read()

@@ -31,26 +31,45 @@ except:
 
 __cloned_paths__ = []
 
-def create(url):
-	class Repository(object):
-		def __init__(self, name, location):
-			self.name = name
-			self.location = location
-			self.branch = None
+class Repository(object):
+	def __init__(self, name, location, repo_type="git"):
+		self.name = name
+		self.location = location
+		self.branch = None
+		self.repo_type = repo_type
 
+def create(url):
 	parsed_url = urlparse(url)
 
-	if parsed_url.scheme == "file" or parsed_url.scheme == "git" or parsed_url.scheme == "http" or \
-	   parsed_url.scheme == "https" or parsed_url.scheme == "ssh":
+	if parsed_url.scheme in ["file", "git", "http", "https", "ssh", "svn", "svn+ssh"]:
 		path = tempfile.mkdtemp(suffix=".gitinspector")
-		git_clone = subprocess.Popen(["git", "clone", url, path], stdout=sys.stderr)
-		git_clone.wait()
 
-		if git_clone.returncode != 0:
-			sys.exit(git_clone.returncode)
+		if parsed_url.scheme in ["svn", "svn+ssh"]:
+			svn_co = subprocess.Popen(["svn", "checkout", url, path], stdout=sys.stderr)
+			svn_co.wait()
 
-		__cloned_paths__.append(path)
-		return Repository(os.path.basename(parsed_url.path), path)
+			if svn_co.returncode != 0:
+				sys.exit(svn_co.returncode)
+
+			__cloned_paths__.append(path)
+			return Repository(os.path.basename(parsed_url.path.rstrip("/")), path, repo_type="svn")
+
+		with open(os.devnull, "w") as devnull:
+			git_clone = subprocess.Popen(["git", "clone", url, path], stdout=sys.stderr, stderr=devnull)
+			git_clone.wait()
+
+		if git_clone.returncode == 0:
+			__cloned_paths__.append(path)
+			return Repository(os.path.basename(parsed_url.path.rstrip("/")), path, repo_type="git")
+
+		svn_co = subprocess.Popen(["svn", "checkout", url, path], stdout=sys.stderr)
+		svn_co.wait()
+
+		if svn_co.returncode == 0:
+			__cloned_paths__.append(path)
+			return Repository(os.path.basename(parsed_url.path.rstrip("/")), path, repo_type="svn")
+
+		sys.exit(git_clone.returncode)
 
 	return Repository(None, os.path.abspath(url))
 

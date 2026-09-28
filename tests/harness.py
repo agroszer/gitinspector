@@ -105,6 +105,45 @@ class Repository(object):
 		self.git("merge", "-q", "--no-ff", "-m", message, name, GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date)
 		return self.git("rev-parse", "HEAD")
 
+class SvnRepository(object):
+	def __init__(self):
+		self.repo_dir = tempfile.mkdtemp(prefix="gitinspector-test-svnrepo-")
+		self.location = tempfile.mkdtemp(prefix="gitinspector-test-svnwc-")
+		self.name = os.path.basename(self.location)
+		self.repo_type = "svn"
+		with open(os.devnull, "w") as devnull:
+			subprocess.check_call(["svnadmin", "create", self.repo_dir], stdout=devnull, stderr=devnull)
+			subprocess.check_call(["svn", "checkout", "file://" + self.repo_dir, self.location], stdout=devnull, stderr=devnull)
+
+	def remove(self):
+		shutil.rmtree(self.location, ignore_errors=True)
+		shutil.rmtree(self.repo_dir, ignore_errors=True)
+
+	def svn(self, *arguments):
+		command = ["svn"] + [__native__(argument) for argument in arguments]
+		output = subprocess.check_output(command, cwd=self.location, stderr=subprocess.STDOUT)
+		return output.decode("utf-8", "replace").strip()
+
+	def commit(self, message, files, author=DEFAULT_AUTHOR):
+		for name, content in files.items():
+			path = os.path.join(self.location, name)
+			if os.path.dirname(path):
+				os.makedirs(os.path.dirname(path), exist_ok=True)
+			is_new = not os.path.exists(path)
+			target = open(path, "wb")
+			target.write(content.encode("utf-8"))
+			target.close()
+			if is_new:
+				self.svn("add", name)
+
+		self.svn("commit", "-m", message, "--username", author)
+		self.svn("update")
+		info = self.svn("info")
+		for line in info.splitlines():
+			if line.startswith("Revision:"):
+				return line.split(":", 1)[1].strip()
+		return "1"
+
 def __inside__(repository, analysis):
 	previous_directory = os.getcwd()
 	os.chdir(repository.location)
@@ -127,10 +166,10 @@ def analyze_changes(repository, since=None, until=None, file_types="**", hard=Fa
 	if exclude:
 		filtering.add(exclude)
 
-	return __inside__(repository, lambda: changes.Changes(None, hard))
+	return __inside__(repository, lambda: changes.Changes(repository if hasattr(repository, "repo_type") else None, hard))
 
 def analyze_blame(repository, analyzed_changes, hard=False, useweeks=False):
-	return __inside__(repository, lambda: blame.Blame(None, hard, useweeks, analyzed_changes))
+	return __inside__(repository, lambda: blame.Blame(repository if hasattr(repository, "repo_type") else None, hard, useweeks, analyzed_changes))
 
 def analyze_metrics(repository):
 	return __inside__(repository, metrics.MetricsLogic)

@@ -25,7 +25,7 @@ import os
 import subprocess
 import threading
 from .localization import N_
-from . import extensions, filtering, format, git, interval, terminal, workers
+from . import extensions, filtering, format, git, interval, svn, terminal, workers
 
 CHANGES_PER_THREAD = 200
 
@@ -113,20 +113,25 @@ class AuthorInfo(object):
 	commits = 0
 
 class ChangesThread(workers.Worker):
-	def __init__(self, hard, changes, hashes, index):
+	def __init__(self, hard, changes, hashes, index, repo=None):
 		workers.Worker.__init__(self)
 
 		self.hard = hard
 		self.changes = changes
 		self.hashes = hashes
 		self.index = index
+		self.repo = repo
 
 	def work(self):
-		# The hashes go on the command line rather than through a pipe, since concurrently spawned children inherit
-		# each other's pipes on Python 2 and then deadlock waiting for the end of their input.
-		lines = workers.output_of(["git", "log", "--no-walk=unsorted", "--pretty=%ct%x00%cd%x00%H%x00%aN%x00%aE",
-		                           "--stat=100000,8192", "--no-merges", "-w", "--date=short"] +
-		                          (["-C", "-C", "-M"] if self.hard else []) + self.hashes).splitlines()
+		location = self.repo.location if self.repo else os.getcwd()
+		is_svn = (self.repo and getattr(self.repo, "repo_type", None) == "svn") or svn.is_svn_repository(location)
+
+		if is_svn:
+			lines = svn.get_log_lines(location, self.hashes)
+		else:
+			lines = workers.output_of(["git", "log", "--no-walk=unsorted", "--pretty=%ct%x00%cd%x00%H%x00%aN%x00%aE",
+			                           "--stat=100000,8192", "--no-merges", "-w", "--date=short"] +
+			                          (["-C", "-C", "-M"] if self.hard else []) + self.hashes).splitlines()
 
 		commit = None
 		found_valid_extension = False
@@ -134,7 +139,7 @@ class ChangesThread(workers.Worker):
 		commits = []
 
 		for i in lines:
-			j = git.decode(i.strip())
+			j = git.decode(i.strip()) if isinstance(i, bytes) else i.strip()
 
 			if Commit.is_commit_line(j):
 				if found_valid_extension:
@@ -179,18 +184,28 @@ class Changes(object):
 		self.latest_commit_by_email = {}
 		self.latest_commit_by_author = {}
 		interval.set_ref("HEAD")
-		git_rev_list_p = subprocess.Popen(filter(None, ["git", "rev-list", "--reverse", "--no-merges",
-		                                  interval.get_since(), interval.get_until(), "HEAD"]),
-		                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-		lines = git_rev_list_p.communicate()[0].splitlines()
-		git_rev_list_p.stdout.close()
 
-		if git_rev_list_p.returncode == 0 and len(lines) > 0:
+		location = repo.location if repo else os.getcwd()
+		is_svn = (repo and getattr(repo, "repo_type", None) == "svn") or svn.is_svn_repository(location)
+
+		if is_svn:
+			hashes = svn.get_rev_list(location, interval.get_since(), interval.get_until())
+		else:
+			git_rev_list_p = subprocess.Popen(filter(None, ["git", "rev-list", "--reverse", "--no-merges",
+			                                  interval.get_since(), interval.get_until(), "HEAD"]),
+			                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+			lines = git_rev_list_p.communicate()[0].splitlines()
+			git_rev_list_p.stdout.close()
+
+			if git_rev_list_p.returncode == 0 and len(lines) > 0:
+				hashes = [entry.decode("utf-8", "replace").strip() for entry in lines]
+			else:
+				hashes = []
+
+		if len(hashes) > 0:
 			progress_text = _(PROGRESS_TEXT)
 			if repo != None:
 				progress_text = "[%s] " % repo.name + progress_text
-
-			hashes = [entry.decode("utf-8", "replace").strip() for entry in lines]
 
 			if interval.has_interval():
 				interval.set_ref(hashes[-1])
@@ -199,7 +214,7 @@ class Changes(object):
 			self.commits = [None] * len(chunks)
 
 			for i, chunk in enumerate(chunks):
-				ChangesThread(hard, self, chunk, i).start()
+				ChangesThread(hard, self, chunk, i, repo).start()
 
 				if format.is_interactive_format():
 					terminal.output_progress(progress_text, i * CHANGES_PER_THREAD, len(hashes))
